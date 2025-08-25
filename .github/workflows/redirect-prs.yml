@@ -1,0 +1,166 @@
+name: Redirecionar PRs para Release Branch
+
+on:
+  workflow_call:
+
+jobs:
+  update-prs-target-to-release-branch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+
+      - name: Calculate next Monday release date
+        id: release-date
+        run: |
+          current_date=$(date +%Y-%m-%d)
+          current_day_of_week=$(date +%u) # 1=Monday, ..., 7=Sunday
+
+          echo "Data atual: $current_date"
+          echo "Dia da semana atual: $current_day_of_week"
+
+          # Calculate days to add to get to the next Monday.
+          # If today is Monday, it will calculate the Monday of the next week (7 days later).
+          days_to_add=$(( (1 - current_day_of_week + 7) % 7 ))
+          if [ $days_to_add -eq 0 ]; then
+            days_to_add=7
+          fi
+
+          echo "Dias para adicionar: $days_to_add"
+
+          release_date=$(date -d "$current_date + $days_to_add days" +%d-%m-%Y)
+          branch_name="release/$release_date"
+
+          echo "release_date=$release_date" >> $GITHUB_OUTPUT
+          echo "branch_name=$branch_name" >> $GITHUB_OUTPUT
+
+      - name: Check if branch already exists
+        id: check-branch
+        run: |
+          branch_name="${{ steps.release-date.outputs.branch_name }}"
+
+          if git show-ref --verify --quiet refs/heads/$branch_name || git show-ref --verify --quiet refs/remotes/origin/$branch_name; then
+            echo "branch_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "branch_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create release branch
+        run: |
+          branch_name="${{ steps.release-date.outputs.branch_name }}"
+          release_date="${{ steps.release-date.outputs.release_date }}"
+          branch_exists="${{ steps.check-branch.outputs.branch_exists }}"
+
+          if [ "$branch_exists" = "true" ]; then
+            
+            if git show-ref --verify --quiet refs/heads/$branch_name; then
+              git checkout $branch_name
+            else
+              git checkout -b $branch_name origin/$branch_name
+            fi
+            
+          else
+            git checkout -b $branch_name
+            git push origin $branch_name
+          fi
+
+          echo "📅 Data da release: $release_date"
+
+      - name: Get open pull requests
+        id: get-prs
+        run: |
+
+          open_prs=$(gh pr list --state open --json number,title,headRefName,author --limit 100)
+
+          echo "$open_prs" | jq -r '.[] | "PR #\(.number): \(.title) (branch: \(.headRefName), autor: \(.author.login))"'
+
+          echo "$open_prs" > open_prs.json
+
+          pr_count=$(echo "$open_prs" | jq length)
+          echo "Total de PRs abertos: $pr_count"
+          echo "pr_count=$pr_count" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update PRs target to release branch
+        run: |
+          branch_name="${{ steps.release-date.outputs.branch_name }}"
+
+          if ! git ls-remote --heads origin "$branch_name" | grep -q "$branch_name"; then
+            echo "❌ Branch $branch_name não encontrada no remote!"
+            exit 1
+          fi
+
+          if [ ! -f open_prs.json ]; then
+            echo "⚠️ Arquivo open_prs.json não encontrado"
+            exit 1
+          fi
+
+          if [ ! -s open_prs.json ]; then
+            echo "⚠️ Arquivo open_prs.json está vazio"
+            exit 1
+          fi
+
+          if ! jq empty open_prs.json 2>/dev/null; then
+            echo "❌ JSON inválido:"
+            cat open_prs.json
+            exit 1
+          fi
+
+          pr_numbers=$(jq -r '.[].number' open_prs.json)
+
+          if [ -z "$pr_numbers" ]; then
+            echo "ℹ️ Nenhum PR encontrado no JSON"
+            exit 0
+          fi
+
+
+          for pr_number in $pr_numbers; do
+
+            pr_info=$(gh pr view "$pr_number" --json number,title,baseRefName,headRefName 2>/dev/null || echo "null")
+
+            if [ "$pr_info" = "null" ]; then
+              continue
+            fi
+
+            current_base=$(echo "$pr_info" | jq -r '.baseRefName')
+            pr_title=$(echo "$pr_info" | jq -r '.title')
+
+            if [ "$current_base" = "$branch_name" ]; then
+              continue
+            fi
+
+            if gh pr edit "$pr_number" --base "$branch_name" 2>&1; then
+              echo "✅ PR #$pr_number alterado com sucesso"
+            fi
+
+            echo ""
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## 🎉 Release Branch criada com sucesso!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch**: \`${{ steps.release-date.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Data da Release**: ${{ steps.release-date.outputs.release_date }}" >> $GITHUB_STEP_SUMMARY
+          echo "**PRs Redirecionados**: ${{ steps.get-prs.outputs.pr_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Ações Realizadas:" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔄 Branch de release criada" >> $GITHUB_STEP_SUMMARY
+          echo "- 🎯 PRs abertos redirecionados para a branch de release" >> $GITHUB_STEP_SUMMARY

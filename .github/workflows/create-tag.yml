@@ -1,0 +1,89 @@
+name: Criar Tag e Release
+
+on:
+  workflow_call:
+    inputs:
+      base_branch:
+        description: "Branch base para o merge (ex: production)"
+        required: true
+        default: "production"
+        type: string
+      release_branch_pattern:
+        description: "Padrão das branches de release"
+        required: false
+        default: "release/"
+        type: string
+
+jobs:
+  tag_and_release:
+    name: Criar Tag e Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repository at specific commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          echo "tag=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)" >> $GITHUB_OUTPUT
+
+      - name: Generate new tag name
+        id: new_tag
+        run: |
+          old_tag="${{ steps.get_tag.outputs.tag }}"
+          IFS='.' read -r major minor patch <<<"${old_tag#v}"
+          new_tag="v$major.$minor.$((patch+1))"
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+
+      - name: Get ClickUp task IDs from commits
+        id: clickup_tasks
+        run: |
+          old_tag="${{ steps.get_tag.outputs.tag }}"
+          if git rev-parse "$old_tag" >/dev/null 2>&1; then
+            commits=$(git log $old_tag..HEAD --pretty=format:"%s")
+          else
+            commits=$(git log --pretty=format:"%s")
+          fi
+
+          ids_commits=$(echo "$commits" | grep -oE 'CU-[a-z0-9]+' | sort -u || true)
+
+          echo "✨ Tarefas da Release:" > description.txt
+          if [ -n "$ids_commits" ]; then
+            echo "$ids_commits" | while read -r id; do
+              echo "- https://app.clickup.com/t/${id/CU-/} - $id" >> description.txt
+            done
+          else
+            echo "- Nenhuma tarefa do ClickUp encontrada nos commits." >> description.txt
+          fi
+
+          # Multiline descriptions need to be passed this way
+          echo "RELEASE_DESCRIPTION<<EOF" >> $GITHUB_ENV
+          cat description.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git tag -a "${{ steps.new_tag.outputs.new_tag }}" -m "${{ env.RELEASE_DESCRIPTION }}"
+          git push origin "${{ steps.new_tag.outputs.new_tag }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.new_tag.outputs.new_tag }}" --title "${{ steps.new_tag.outputs.new_tag }}" --notes "${{ env.RELEASE_DESCRIPTION }}"

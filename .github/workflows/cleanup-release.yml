@@ -1,0 +1,52 @@
+name: Cleanup
+
+on:
+  workflow_call:
+
+jobs:
+  cleanup-release:
+    name: Limpeza de Branches
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Git
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions@github.com"
+
+      - name: Limpar branches de release com mais de 2 semanas
+        id: cleanup_step
+        run: |
+          echo "Iniciando limpeza de branches de release antigas..."
+
+          NOW_SECONDS=$(date +%s)
+          TWO_WEEKS_AGO_SECONDS=$(date -d "3 weeks ago" +%s)
+
+          git branch -r | grep "origin/release/" | while read -r branch; do
+            CLEAN_BRANCH_NAME=$(echo "$branch" | sed 's/origin\///')
+
+            if [[ "$CLEAN_BRANCH_NAME" =~ release/([0-9]{2})-([0-9]{2})-([0-9]{4}) ]]; then
+              DAY=${BASH_REMATCH[1]}
+              MONTH=${BASH_REMATCH[2]}
+              YEAR=${BASH_REMATCH[3]}
+              
+              BRANCH_DATE_SECONDS=$(date -d "$YEAR-$MONTH-$DAY" +%s)
+
+              if [ "$BRANCH_DATE_SECONDS" -lt "$TWO_WEEKS_AGO_SECONDS" ]; then
+                git push origin --delete "$CLEAN_BRANCH_NAME"
+              else
+                echo "-> MANTENDO: A branch '$CLEAN_BRANCH_NAME' é recente."
+              fi
+            else
+              echo "-> IGNORANDO: A branch '$CLEAN_BRANCH_NAME' não corresponde ao formato de data esperado."
+            fi
+          done
+
+          echo "✅ Limpeza de branches concluída."

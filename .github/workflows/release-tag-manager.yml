@@ -1,0 +1,87 @@
+name: Criar Tag e Release
+
+on:
+  workflow_call:
+    inputs:
+      commit_to_tag:
+        description: "O SHA do commit que deve ser tagueado."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  tag_release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository at specific commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_to_tag }}
+          fetch-depth: 0 # Necessário para buscar o histórico e as tags
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          echo "tag=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)" >> $GITHUB_OUTPUT
+
+      - name: Generate tag name
+        id: new_tag
+        run: |
+          old_tag="${{ steps.get_tag.outputs.tag }}"
+          IFS='.' read -r major minor patch <<<"${old_tag#v}"
+          new_tag="v$major.$minor.$((patch+1))"
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+
+      - name: Get ClickUp task IDs from commits and branch
+        id: clickup_tasks
+        run: |
+          old_tag="${{ steps.get_tag.outputs.tag }}"
+          git tag || true
+          git show-ref --tags || true
+
+          # Get commits since the last tag (robust to missing tag)
+          if git rev-parse "$old_tag" >/dev/null 2>&1; then
+            commits=$(git log $old_tag..HEAD --pretty=format:"%s")
+          else
+            commits=$(git log --pretty=format:"%s")
+          fi
+          echo "$commits" > commits.txt
+
+          # Extract CU-xxxxx codes from commits
+          ids_commits=$(grep -oE 'CU-[a-z0-9]+' commits.txt | sort -u || true)
+
+          # Combine and remove duplicates (now only from commits)
+          ids="$ids_commits"
+          echo "$ids" > clickup.txt
+
+          # Generate the description with links
+          echo "✨ Tarefas adicionadas:" > description.txt
+          while read -r id; do
+            if [ -n "$id" ]; then
+              echo "https://app.clickup.com/t/${id/CU-/} - $id" >> description.txt
+            fi
+          done < clickup.txt
+
+          echo "description<<EOF" >> $GITHUB_ENV
+          cat description.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git tag -a "${{ steps.new_tag.outputs.new_tag }}" -m "$description"
+          git push origin "${{ steps.new_tag.outputs.new_tag }}"
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Install GitHub CLI if not present
+          if ! command -v gh > /dev/null; then
+            sudo apt-get update && sudo apt-get install -y gh
+          fi
+          gh release create "${{ steps.new_tag.outputs.new_tag }}" --title "${{ steps.new_tag.outputs.new_tag }}" --notes "$description" --repo "$GITHUB_REPOSITORY" --verify-tag
